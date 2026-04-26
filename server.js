@@ -1,153 +1,113 @@
-/**
- * FreeLead Pro — Main Server
- * Express API + scheduled scans + background jobs
- */
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
-const { initDb } = require('./db/database');
-const logger = require('./services/logger');
-
-const leadsRouter = require('./routes/leads');
-const outreachRouter = require('./routes/outreach');
-const testRouter     = require('./routes/test');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3001; // Railway sets PORT automatically
 
-// ── Middleware ───────────────────────────────────────────────────
-const allowedOrigins = [
-  process.env.FRONTEND_URL,           // e.g. https://freelead-pro.netlify.app
-  'http://localhost:3000',
-  'http://localhost:5500',
-  'http://127.0.0.1:5500',
-].filter(Boolean);
-
-app.use(cors({
-  origin: (origin, cb) => {
-    // Allow requests with no origin (curl, Postman, mobile apps)
-    if (!origin) return cb(null, true);
-    if (process.env.NODE_ENV !== 'production') return cb(null, true);
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS: origin ${origin} not allowed`));
-  },
-  credentials: true,
-}));
-
+// ── Middleware ────────────────────────────────────────────────────
+app.use(cors({ origin: '*' })); // open for now — lock down after frontend is live
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting — prevent API abuse
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200,
-  message: { error: 'Too many requests — please try again later' }
-});
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
 app.use('/api/', limiter);
 
-// Request logging
-app.use((req, _res, next) => {
-  logger.debug(`${req.method} ${req.path}`);
-  next();
-});
-
-// ── Routes ───────────────────────────────────────────────────────
-app.use('/api/leads', leadsRouter);
-app.use('/api/test',  testRouter);
-app.use('/api/outreach', outreachRouter);
-
-// Health check
-app.get('/api/health', async (_req, res) => {
+// ── Health check (must respond FAST — Railway checks this on startup) ──
+app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    features: {
-      ai: !!process.env.ANTHROPIC_API_KEY,
-      googleMaps: !!process.env.GOOGLE_MAPS_API_KEY,
-      twitter: !!process.env.TWITTER_BEARER_TOKEN,
-      email: !!(process.env.EMAIL_USER && process.env.EMAIL_PASS)
+    apis: {
+      ai:        !!process.env.ANTHROPIC_API_KEY,
+      email:     !!(process.env.EMAIL_USER && process.env.EMAIL_PASS),
+      googleMaps:!!process.env.GOOGLE_MAPS_API_KEY,
+      twitter:   !!process.env.TWITTER_BEARER_TOKEN,
     }
   });
 });
 
-// 404 handler
-app.use((_req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+// ── Routes ────────────────────────────────────────────────────────
+const leadsRouter    = require('./routes/leads');
+const outreachRouter = require('./routes/outreach');
+const testRouter     = require('./routes/test');
+
+app.use('/api/leads',    leadsRouter);
+app.use('/api/outreach', outreachRouter);
+app.use('/api/test',     testRouter);
+
+// 404
+app.use((_req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // Error handler
 app.use((err, _req, res, _next) => {
-  logger.error(`Unhandled error: ${err.message}`);
+  console.error('Unhandled error:', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── Scheduled Cron Jobs ──────────────────────────────────────────
-function startCronJobs() {
-  const { runJobBoardScan } = require('./scrapers/jobBoards');
-  const { runMapsScan } = require('./scrapers/googleMaps');
-  const { runSocialScan } = require('./scrapers/socialMedia');
-  const { runDomainScan } = require('./scrapers/domainTracker');
-  const { processFollowUps } = require('./services/emailSender');
-
-  // Job boards — every 2 hours
-  cron.schedule('0 */2 * * *', async () => {
-    logger.info('[CRON] Running job board scan...');
-    await runJobBoardScan().catch(err => logger.error(`Cron job board: ${err.message}`));
-  });
-
-  // Google Maps — once a day at 8am
-  cron.schedule('0 8 * * *', async () => {
-    logger.info('[CRON] Running Google Maps scan...');
-    await runMapsScan().catch(err => logger.error(`Cron maps: ${err.message}`));
-  });
-
-  // Social media — every 4 hours
-  cron.schedule('0 */4 * * *', async () => {
-    logger.info('[CRON] Running social media scan...');
-    await runSocialScan().catch(err => logger.error(`Cron social: ${err.message}`));
-  });
-
-  // Domain tracker — once a day at 9am
-  cron.schedule('0 9 * * *', async () => {
-    logger.info('[CRON] Running domain expiry scan...');
-    await runDomainScan().catch(err => logger.error(`Cron domains: ${err.message}`));
-  });
-
-  // Follow-up emails — every morning at 10am
-  cron.schedule('0 10 * * *', async () => {
-    logger.info('[CRON] Processing follow-up emails...');
-    await processFollowUps().catch(err => logger.error(`Cron follow-ups: ${err.message}`));
-  });
-
-  logger.info('✅ Cron jobs scheduled');
-}
-
-// ── Bootstrap ────────────────────────────────────────────────────
-async function bootstrap() {
-  // Create logs directory
+// ── Database + Start ──────────────────────────────────────────────
+async function start() {
   const fs = require('fs');
   if (!fs.existsSync('./logs')) fs.mkdirSync('./logs');
+  if (!fs.existsSync('./db'))   fs.mkdirSync('./db');
 
-  // Initialise database
+  // Init database
+  const { initDb } = require('./db/database');
   await initDb();
-  logger.info('✅ Database initialised');
+  console.log('✅ Database ready');
 
-  // Start scheduled jobs
+  // Start cron jobs only if we have the needed keys
   startCronJobs();
 
   // Start server
-  app.listen(PORT, () => {
-    logger.info(`🚀 FreeLead Pro API running on http://localhost:${PORT}`);
-    logger.info(`📋 API docs: http://localhost:${PORT}/api/health`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 LeadHive API running on port ${PORT}`);
+    console.log(`📋 Health: http://localhost:${PORT}/api/health`);
   });
 }
 
-bootstrap().catch(err => {
-  logger.error(`Failed to start: ${err.message}`);
+function startCronJobs() {
+  const { runJobBoardScan } = require('./scrapers/jobBoards');
+  const { runSocialScan }   = require('./scrapers/socialMedia');
+
+  // Job boards every 2 hours
+  cron.schedule('0 */2 * * *', () => {
+    console.log('[CRON] Job board scan...');
+    runJobBoardScan().catch(e => console.error('Cron jobs error:', e.message));
+  });
+
+  // Social media every 4 hours
+  cron.schedule('0 */4 * * *', () => {
+    console.log('[CRON] Social scan...');
+    runSocialScan().catch(e => console.error('Cron social error:', e.message));
+  });
+
+  // Google Maps once a day — only if key is set
+  if (process.env.GOOGLE_MAPS_API_KEY) {
+    const { runMapsScan } = require('./scrapers/googleMaps');
+    cron.schedule('0 8 * * *', () => {
+      console.log('[CRON] Maps scan...');
+      runMapsScan().catch(e => console.error('Cron maps error:', e.message));
+    });
+  }
+
+  // Follow-ups every morning
+  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    const { processFollowUps } = require('./services/emailSender');
+    cron.schedule('0 10 * * *', () => {
+      console.log('[CRON] Follow-ups...');
+      processFollowUps().catch(e => console.error('Cron followups error:', e.message));
+    });
+  }
+
+  console.log('✅ Cron jobs scheduled');
+}
+
+start().catch(err => {
+  console.error('❌ Failed to start server:', err.message);
   process.exit(1);
 });
 
