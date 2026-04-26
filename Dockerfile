@@ -1,28 +1,24 @@
-FROM node:18-slim
+FROM node:18
 
-# Set working directory
 WORKDIR /app
 
-# Tell Puppeteer to skip downloading Chromium
-# We don't need it for scraping — we use axios + cheerio instead
+# Skip Puppeteer Chromium (we don't need it)
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV NODE_ENV=production
 
-# Copy package files first (better Docker layer caching)
+# Copy package files
 COPY package*.json ./
 
-# Install dependencies (Puppeteer won't download Chromium now)
+# Install dependencies (node:18 has build tools for sqlite3)
 RUN npm install --omit=dev
 
-# Copy the rest of the app
+# Copy app files
 COPY . .
 
 # Create required directories
 RUN mkdir -p logs db
 
-# Expose the port Railway uses
 EXPOSE 3001
 
-# Start the server
 CMD ["node", "server.js"]
