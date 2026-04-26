@@ -1,12 +1,11 @@
 {
   "name": "freelead-pro",
   "version": "1.0.0",
-  "description": "Automated lead generation tool for freelance web designers",
+  "description": "Automated lead generation tool for freelancers",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
-    "setup-db": "node db/setup.js"
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
@@ -18,7 +17,6 @@
     "express-rate-limit": "^7.1.5",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.7",
-    "puppeteer": "^21.5.2",
     "sqlite3": "^5.1.6",
     "whois": "^2.13.6",
     "winston": "^3.11.0"
