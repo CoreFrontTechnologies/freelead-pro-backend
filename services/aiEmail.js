@@ -173,3 +173,54 @@ async function testAIConnection() {
 }
 
 module.exports = { generateColdEmail, generateFollowUp, analyseLeadWithAI, testAIConnection };
+
+// ── Skill-aware prompt builder ────────────────────────────────────
+const SKILL_EMAIL_TONES = {
+  web_design:    'Position yourself as a web designer who builds sites that generate real leads and sales for businesses.',
+  graphic_design:'Position yourself as a brand designer who makes businesses look professional, trustworthy, and memorable.',
+  video_editing: 'Position yourself as a video editor who helps businesses grow their audience and engagement through compelling video content.',
+  copywriting:   'Position yourself as a copywriter who helps businesses attract more customers through words that convert.',
+  social_media:  'Position yourself as a social media manager who builds brand presence and drives real followers and engagement.',
+  seo_marketing: 'Position yourself as an SEO expert who helps businesses rank higher on Google and get more organic customers.',
+  mobile_dev:    'Position yourself as a mobile developer who turns business ideas into powerful apps their customers love.',
+  photography:   'Position yourself as a photographer who makes businesses look stunning and attract more clients.',
+  virtual_assistant: 'Position yourself as a VA who saves business owners time so they can focus on growth.',
+};
+
+async function generateSkillAwareEmail(lead, tone = 'professional', sender = {}) {
+  const skill       = process.env.FREELANCE_SKILL || 'web_design';
+  const skillTone   = SKILL_EMAIL_TONES[skill] || SKILL_EMAIL_TONES.web_design;
+  const senderName  = sender.name         || process.env.SENDER_NAME      || 'Alex';
+  const senderSkills= sender.skills       || process.env.SENDER_SKILLS    || 'freelance services';
+  const portfolio   = sender.portfolioUrl || process.env.SENDER_PORTFOLIO || 'myportfolio.com';
+
+  const tones = { professional:'Professional and concise.', friendly:'Warm and conversational.', bold:'Confident and direct.' };
+
+  const prompt = `You are a freelancer named ${senderName}. Skills: ${senderSkills}. Portfolio: ${portfolio}.
+${skillTone}
+
+LEAD:
+- Company: ${lead.name}
+- What they need: ${lead.description || lead.desc}
+- Found via: ${lead.source || lead.src}
+- Industry: ${lead.industry || lead.ind || 'Unknown'}
+- Budget: ${lead.budget_estimate || lead.budget || 'Unknown'}
+
+Tone: ${tones[tone] || tones.professional}
+
+Write a cold outreach email:
+1. Specific opener about THEIR business — not generic
+2. One concrete result you achieved for a similar client
+3. Soft CTA — suggest a 15-minute call
+4. 3-4 short paragraphs max
+5. Sign off as ${senderName} only
+
+Respond ONLY with valid JSON, no backticks:
+{"subject":"...","body":"..."}`;
+
+  const text = await callAI(prompt);
+  const parsed = parseJSON(text);
+  return { subject: parsed.subject, body: parsed.body, tone, skill };
+}
+
+module.exports.generateSkillAwareEmail = generateSkillAwareEmail;

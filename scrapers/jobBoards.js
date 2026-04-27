@@ -1,192 +1,161 @@
 /**
- * Job Board Scraper
- * Scrapes: RemoteOK (public API), We Work Remotely, Freelancer listings
- * Note: Upwork requires OAuth — instructions in README
+ * Job Board Scraper — NO API KEY REQUIRED
+ * Adapts keywords based on FREELANCE_SKILL env var
+ * Sources: RemoteOK, WeWorkRemotely, Freelancer.com
  */
-
-const axios = require('axios');
+const axios   = require('axios');
 const cheerio = require('cheerio');
 const { run } = require('../db/database');
-const logger = require('../services/logger');
+const logger  = require('../services/logger');
 
-const WEB_DESIGN_KEYWORDS = [
-  'web design', 'web designer', 'website design', 'landing page',
-  'wordpress', 'webflow', 'shopify', 'ui design', 'frontend',
-  'website redesign', 'website developer', 'web developer'
-];
+// Keywords per skill — set FREELANCE_SKILL in Railway Variables
+const SKILL_KEYWORDS = {
+  web_design:     ['web design','web designer','website','landing page','wordpress','webflow','shopify','frontend','ui design','ux design','website redesign'],
+  graphic_design: ['graphic design','graphic designer','logo design','branding','brand identity','illustrator','visual identity','creative design'],
+  video_editing:  ['video editor','video editing','video production','youtube editor','motion graphics','videographer','reel editor','video content'],
+  copywriting:    ['copywriter','content writer','blog writer','SEO writer','email copywriter','ghostwriter','technical writer','content creator'],
+  social_media:   ['social media manager','social media marketing','instagram manager','facebook ads','community manager','social media strategist'],
+  seo_marketing:  ['SEO specialist','digital marketer','SEO expert','Google ads','PPC specialist','marketing consultant','SEM','growth marketing'],
+  mobile_dev:     ['mobile developer','app developer','iOS developer','android developer','react native','flutter','mobile app'],
+  photography:    ['photographer','product photographer','real estate photographer','event photographer','videographer','commercial photography'],
+  virtual_assistant: ['virtual assistant','VA','executive assistant','admin assistant','remote assistant','personal assistant'],
+};
 
-function matchesKeywords(text) {
-  const lower = text.toLowerCase();
-  return WEB_DESIGN_KEYWORDS.some(kw => lower.includes(kw));
+const DEFAULT_KEYWORDS = SKILL_KEYWORDS.web_design;
+
+function getKeywords() {
+  const skill = process.env.FREELANCE_SKILL || 'web_design';
+  return SKILL_KEYWORDS[skill] || DEFAULT_KEYWORDS;
 }
 
-function scoreJobLead(job) {
-  let score = 50;
-  const text = `${job.name} ${job.description}`.toLowerCase();
-
-  if (text.includes('urgent') || text.includes('asap')) score += 15;
-  if (text.includes('budget') || text.includes('$') || text.includes('pay')) score += 10;
-  if (text.includes('long term') || text.includes('ongoing')) score += 10;
-  if (text.includes('redesign')) score += 8;
-  if (text.includes('e-commerce') || text.includes('ecommerce')) score += 8;
-  if (text.includes('shopify') || text.includes('webflow')) score += 5;
-  if (text.includes('full website')) score += 5;
-
-  return Math.min(score, 99);
+function matches(text) {
+  const t = (text||'').toLowerCase();
+  return getKeywords().some(k => t.includes(k.toLowerCase()));
 }
 
-// ── RemoteOK (has a public JSON API) ────────────────────────────
+function scoreIt(title, desc) {
+  let s = 50;
+  const t = ((title||'')+' '+(desc||'')).toLowerCase();
+  if (t.includes('urgent') || t.includes('asap'))           s += 18;
+  if (t.includes('budget') || t.includes('$'))              s += 12;
+  if (t.includes('long term') || t.includes('ongoing'))     s += 10;
+  if (t.includes('e-commerce') || t.includes('ecommerce'))  s += 8;
+  if (t.includes('redesign') || t.includes('revamp'))       s += 8;
+  if (t.includes('full') || t.includes('complete'))         s += 6;
+  return Math.min(s, 99);
+}
+
 async function scrapeRemoteOK() {
   const leads = [];
   try {
+    logger.info('Scanning RemoteOK...');
     const { data } = await axios.get('https://remoteok.com/api', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FreeleadPro/1.0)' },
-      timeout: 10000
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClientHunter/1.0)' },
+      timeout: 15000,
     });
-
-    const jobs = Array.isArray(data) ? data.slice(1) : [];
-
+    const jobs = Array.isArray(data) ? data.slice(1, 60) : [];
     for (const job of jobs) {
       const title = job.position || '';
-      const desc = job.description || '';
-
-      if (!matchesKeywords(title + ' ' + desc)) continue;
-
+      const desc  = (job.description||'').replace(/<[^>]+>/g,'');
+      if (!matches(title+' '+desc)) continue;
       leads.push({
-        name: job.company || 'Unknown Company',
-        description: `${title} — ${desc.substring(0, 200)}`,
-        source: 'RemoteOK',
-        source_url: job.url || 'https://remoteok.com',
-        industry: job.tags ? job.tags[0] : 'Remote',
+        name: job.company || 'Company on RemoteOK',
+        description: `Hiring: ${title} — ${desc.substring(0,180)}`,
+        source: 'RemoteOK', source_url: job.url || 'https://remoteok.com',
+        industry: (job.tags||[])[0] || 'Remote',
         budget_estimate: job.salary || 'Negotiable',
-        score: scoreJobLead({ name: title, description: desc })
+        score: scoreIt(title, desc),
       });
     }
-
-    logger.info(`RemoteOK: found ${leads.length} web design leads`);
-  } catch (err) {
-    logger.error(`RemoteOK scrape failed: ${err.message}`);
-  }
+    logger.info(`RemoteOK: ${leads.length} leads`);
+  } catch (err) { logger.error(`RemoteOK: ${err.message}`); }
   return leads;
 }
 
-// ── We Work Remotely ─────────────────────────────────────────────
 async function scrapeWeWorkRemotely() {
   const leads = [];
   try {
-    const { data } = await axios.get(
-      'https://weworkremotely.com/categories/remote-design-jobs.rss',
-      { timeout: 10000 }
-    );
+    logger.info('Scanning WeWorkRemotely...');
+    const skill = process.env.FREELANCE_SKILL || 'web_design';
+    const category = skill.includes('video') ? 'remote-design-jobs' :
+                     skill.includes('copywriting') ? 'remote-writing-jobs' :
+                     skill.includes('seo') ? 'remote-marketing-jobs' :
+                     skill.includes('mobile') ? 'remote-programming-jobs' :
+                     'remote-design-jobs';
 
+    const { data } = await axios.get(`https://weworkremotely.com/categories/${category}.rss`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClientHunter/1.0)' },
+      timeout: 15000,
+    });
     const $ = cheerio.load(data, { xmlMode: true });
-
     $('item').each((_, el) => {
-      const title = $(el).find('title').text();
-      const desc = $(el).find('description').text().replace(/<[^>]+>/g, '');
-      const link = $(el).find('link').text();
-
-      if (!matchesKeywords(title + ' ' + desc)) return;
-
-      const company = title.split(':')[0]?.trim() || 'Unknown';
-      const role = title.split(':')[1]?.trim() || title;
-
+      const title = $(el).find('title').text().replace(/\<\!\[CDATA\[|\]\]\>/g,'').trim();
+      const desc  = $(el).find('description').text().replace(/<[^>]+>/g,'').trim();
+      const link  = $(el).find('link').text().trim();
+      if (!matches(title+' '+desc)) return;
+      const parts = title.split(':');
       leads.push({
-        name: company,
-        description: `${role} — ${desc.substring(0, 200)}`,
-        source: 'WeWorkRemotely',
-        source_url: link,
-        industry: 'Remote / Design',
-        budget_estimate: 'Negotiable',
-        score: scoreJobLead({ name: title, description: desc })
+        name: parts[0]?.trim() || 'Company',
+        description: `Hiring: ${parts.slice(1).join(':').trim() || title}`,
+        source: 'WeWorkRemotely', source_url: link,
+        industry: 'Remote', budget_estimate: 'Negotiable',
+        score: scoreIt(title, desc),
       });
     });
-
-    logger.info(`WeWorkRemotely: found ${leads.length} leads`);
-  } catch (err) {
-    logger.error(`WeWorkRemotely scrape failed: ${err.message}`);
-  }
+    logger.info(`WeWorkRemotely: ${leads.length} leads`);
+  } catch (err) { logger.error(`WeWorkRemotely: ${err.message}`); }
   return leads;
 }
 
-// ── LinkedIn Jobs (via axios + cheerio public scrape) ─────────────
-async function scrapeLinkedIn() {
+async function scrapeFreelancer() {
   const leads = [];
   try {
-    const keywords = encodeURIComponent('web designer');
-    const url = `https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=${keywords}&location=&start=0`;
-
-    const { data } = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 10000
-    });
-
-    const $ = cheerio.load(data);
-
-    $('li').each((_, el) => {
-      const title = $(el).find('.base-search-card__title').text().trim();
-      const company = $(el).find('.base-search-card__subtitle').text().trim();
-      const link = $(el).find('a').attr('href') || '';
-
-      if (!title || !company) return;
-      if (!matchesKeywords(title)) return;
-
+    logger.info('Scanning Freelancer.com...');
+    const { data } = await axios.get(
+      'https://www.freelancer.com/api/projects/0.1/projects/active/?limit=25&job_details=true',
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }
+    );
+    const projects = data?.result?.projects || [];
+    for (const p of projects) {
+      const title = p.title || '';
+      const desc  = p.preview_description || '';
+      if (!matches(title+' '+desc)) continue;
+      const budget = p.budget ? `$${p.budget.minimum}–$${p.budget.maximum}` : 'Negotiable';
       leads.push({
-        name: company,
-        description: `Hiring: ${title}`,
-        source: 'LinkedIn',
-        source_url: link,
-        industry: 'Business',
-        budget_estimate: 'Negotiable',
-        score: scoreJobLead({ name: title, description: company })
+        name: 'Client on Freelancer.com',
+        description: `${title} — ${desc.substring(0,180)}`,
+        source: 'Freelancer.com',
+        source_url: `https://www.freelancer.com/projects/${p.seo_url||p.id}`,
+        industry: 'Freelance Project', budget_estimate: budget,
+        score: scoreIt(title, desc),
       });
-    });
-
-    logger.info(`LinkedIn: found ${leads.length} leads`);
-  } catch (err) {
-    logger.error(`LinkedIn scrape failed: ${err.message}`);
-  }
+    }
+    logger.info(`Freelancer.com: ${leads.length} leads`);
+  } catch (err) { logger.error(`Freelancer.com: ${err.message}`); }
   return leads;
 }
 
-// ── Save leads to DB (deduplicate by source_url) ─────────────────
 async function saveLeads(leads) {
   let saved = 0;
-  for (const lead of leads) {
+  for (const l of leads) {
     try {
-      await run(
-        `INSERT OR IGNORE INTO leads (name, description, source, source_url, industry, budget_estimate, score, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'New')`,
-        [lead.name, lead.description, lead.source, lead.source_url,
-         lead.industry, lead.budget_estimate, lead.score]
+      const r = await run(
+        `INSERT OR IGNORE INTO leads (name,description,source,source_url,industry,budget_estimate,score,status) VALUES(?,?,?,?,?,?,?,'New')`,
+        [l.name,l.description,l.source,l.source_url,l.industry,l.budget_estimate,l.score]
       );
-      saved++;
-    } catch (err) {
-      logger.error(`Failed to save lead: ${err.message}`);
-    }
+      if (r.changes > 0) saved++;
+    } catch (e) { logger.error(`Save: ${e.message}`); }
   }
   return saved;
 }
 
 async function runJobBoardScan() {
-  logger.info('Starting job board scan...');
-  const [remote, wwr, linkedin] = await Promise.all([
-    scrapeRemoteOK(),
-    scrapeWeWorkRemotely(),
-    scrapeLinkedIn()
-  ]);
-
-  const all = [...remote, ...wwr, ...linkedin];
+  logger.info(`Job board scan (skill: ${process.env.FREELANCE_SKILL||'web_design'})...`);
+  const results = await Promise.allSettled([scrapeRemoteOK(), scrapeWeWorkRemotely(), scrapeFreelancer()]);
+  const all = results.flatMap(r => r.value || []);
   const saved = await saveLeads(all);
-
-  await run(
-    'INSERT INTO scan_logs (source, leads_found, status) VALUES (?, ?, ?)',
-    ['job_boards', saved, 'success']
-  );
-
-  logger.info(`Job board scan complete. ${saved} leads saved.`);
+  await run('INSERT INTO scan_logs(source,leads_found,status)VALUES(?,?,?)',['job_boards',saved,'success']);
+  logger.info(`Job boards done: ${saved} saved`);
   return { total: all.length, saved };
 }
 

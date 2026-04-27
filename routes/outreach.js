@@ -20,7 +20,14 @@ router.post('/generate', async (req, res) => {
     const lead = await get('SELECT * FROM leads WHERE id = ?', [lead_id]);
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const email = await generateColdEmail(lead, tone, sender || {});
+    // Use skill-aware generation if available
+    let email;
+    try {
+      const { generateSkillAwareEmail } = require('../services/aiEmail');
+      email = await generateSkillAwareEmail(lead, tone, sender || {});
+    } catch(e) {
+      email = await generateColdEmail(lead, tone, sender || {});
+    }
     res.json({ success: true, ...email, lead });
   } catch (err) {
     logger.error(`Email generation failed: ${err.message}`);
@@ -84,7 +91,14 @@ router.post('/send-generated', async (req, res) => {
     const lead = await get('SELECT * FROM leads WHERE id = ?', [lead_id]);
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    const email = await generateColdEmail(lead, tone, sender || {});
+    // Use skill-aware generation if available
+    let email;
+    try {
+      const { generateSkillAwareEmail } = require('../services/aiEmail');
+      email = await generateSkillAwareEmail(lead, tone, sender || {});
+    } catch(e) {
+      email = await generateColdEmail(lead, tone, sender || {});
+    }
     const result = await sendEmail({ to, subject: email.subject, body: email.body, leadId: lead_id });
 
     res.json({ success: true, email, ...result });
