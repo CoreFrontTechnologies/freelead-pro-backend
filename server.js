@@ -10,6 +10,7 @@ app.use(express.json());
 
 // ── Health check — must be first and always respond ───────────────
 app.get('/api/health', (req, res) => {
+  const memMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
   res.status(200).json({
     status    : 'ok',
     version   : '1.0.0',
@@ -28,9 +29,11 @@ try {
   const leadsRouter    = require('./routes/leads');
   const outreachRouter = require('./routes/outreach');
   const testRouter     = require('./routes/test');
+const logsRouter     = require('./routes/logs');
   app.use('/api/leads',    leadsRouter);
   app.use('/api/outreach', outreachRouter);
   app.use('/api/test',     testRouter);
+app.use('/api/logs',     logsRouter);
 } catch (err) {
   console.error('Failed to load routes:', err.message);
 }
