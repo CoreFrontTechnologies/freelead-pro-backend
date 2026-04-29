@@ -1,7 +1,10 @@
 /**
  * AI Email Service
- * Supports: Gemini (FREE) | OpenAI | Anthropic
- * Auto-detects which key you have in Railway Variables
+ * Supports: Gemini | OpenAI | Anthropic
+ * 
+ * IMPORTANT — Gemini key must come from AI STUDIO, not Google Cloud:
+ *   Go to: aistudio.google.com → Get API Key → Create API key
+ *   That key has free quota. Cloud Console keys have quota=0.
  */
 const axios  = require('axios');
 const logger = require('./logger');
@@ -10,45 +13,55 @@ function getProvider() {
   if (process.env.GEMINI_API_KEY)    return 'gemini';
   if (process.env.OPENAI_API_KEY)    return 'openai';
   if (process.env.ANTHROPIC_API_KEY) return 'anthropic';
-  throw new Error('No AI key found. Add GEMINI_API_KEY in Railway Variables (free at aistudio.google.com)');
+  throw new Error(
+    'No AI key found. Add GEMINI_API_KEY in Railway Variables.\n' +
+    'IMPORTANT: Get your Gemini key from aistudio.google.com NOT from Google Cloud Console.\n' +
+    'AI Studio keys have free quota. Cloud Console keys have quota=0.'
+  );
 }
 
-// ── Gemini (FREE) ─────────────────────────────────────────────────
-// Updated model names as of 2025
 async function callGemini(prompt) {
   const key = process.env.GEMINI_API_KEY;
-  const models = [
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash-8b',
-    'gemini-1.5-flash',
+
+  // Try v1 endpoint first (more stable), then v1beta
+  // Model list updated for 2025/2026
+  const attempts = [
+    { base: 'https://generativelanguage.googleapis.com/v1',     model: 'gemini-2.0-flash' },
+    { base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.0-flash' },
+    { base: 'https://generativelanguage.googleapis.com/v1',     model: 'gemini-1.5-flash' },
+    { base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-1.5-flash' },
+    { base: 'https://generativelanguage.googleapis.com/v1',     model: 'gemini-pro' },
+    { base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-pro' },
   ];
+
   let lastError;
-  for (const model of models) {
+  for (const { base, model } of attempts) {
     try {
+      const url = `${base}/models/${model}:generateContent?key=${key}`;
       const { data } = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-        {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 1000, temperature: 0.7 },
-        },
+        url,
+        { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1000, temperature: 0.7 } },
         { timeout: 30000 }
       );
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error('Empty response');
-      logger.info(`Gemini model ${model}: success`);
+      if (!text) throw new Error('Empty response from Gemini');
+      logger.info(`Gemini OK: ${model} on ${base.includes('v1beta') ? 'v1beta' : 'v1'}`);
       return text;
     } catch (err) {
       const msg = err.response?.data?.error?.message || err.message;
-      logger.warn(`Gemini ${model} failed: ${msg}`);
+      // If quota exceeded, no point trying same model on other endpoint
+      if (msg.includes('Quota exceeded') || msg.includes('quota')) {
+        logger.warn(`Gemini ${model}: quota exceeded — KEY ISSUE: Get key from aistudio.google.com not Cloud Console`);
+        lastError = new Error(`Gemini quota exceeded. Your GEMINI_API_KEY was created in Google Cloud Console (quota=0). Please create a NEW key at aistudio.google.com and update GEMINI_API_KEY in Railway Variables.`);
+        break;
+      }
+      logger.warn(`Gemini ${model}: ${msg}`);
       lastError = err;
     }
   }
-  throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
+  throw lastError || new Error('All Gemini attempts failed');
 }
 
-// ── OpenAI ────────────────────────────────────────────────────────
 async function callOpenAI(prompt) {
   const { data } = await axios.post(
     'https://api.openai.com/v1/chat/completions',
@@ -58,17 +71,12 @@ async function callOpenAI(prompt) {
   return data.choices[0].message.content;
 }
 
-// ── Anthropic ─────────────────────────────────────────────────────
 async function callAnthropic(prompt) {
   const { data } = await axios.post(
     'https://api.anthropic.com/v1/messages',
     { model: 'claude-sonnet-4-6', max_tokens: 1000, messages: [{ role: 'user', content: prompt }] },
     {
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      },
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
       timeout: 30000,
     }
   );
@@ -84,9 +92,9 @@ async function callAI(prompt) {
 }
 
 function parseJSON(text) {
-  const clean = text.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+  const clean = (text || '').replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
   const match = clean.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`No JSON in AI response: ${clean.substring(0, 100)}`);
+  if (!match) throw new Error(`No JSON in response: ${clean.substring(0, 100)}`);
   return JSON.parse(match[0]);
 }
 
@@ -103,22 +111,16 @@ const SKILL_TONES = {
   other:             'You are a skilled freelancer who delivers real results for clients.',
 };
 
-const EMAIL_TONES = {
-  professional: 'Professional and concise.',
-  friendly:     'Warm and conversational.',
-  bold:         'Confident and direct. Strong opener.',
-};
-
 function buildPrompt(lead, tone, sender) {
   const skill     = process.env.FREELANCE_SKILL || 'web_design';
   const skillTone = SKILL_TONES[skill] || SKILL_TONES.web_design;
   const name      = sender.name         || process.env.SENDER_NAME      || 'Alex';
   const skills    = sender.skills       || process.env.SENDER_SKILLS    || 'freelance services';
   const portfolio = sender.portfolioUrl || process.env.SENDER_PORTFOLIO || 'myportfolio.com';
-  const emailTone = EMAIL_TONES[tone]   || EMAIL_TONES.professional;
+  const toneMap   = { professional: 'Professional and concise.', friendly: 'Warm and conversational.', bold: 'Confident and direct.' };
 
   return `${skillTone}
-Your name: ${name}. Your skills: ${skills}. Portfolio: ${portfolio}.
+Name: ${name}. Skills: ${skills}. Portfolio: ${portfolio}.
 
 Write a cold outreach email for this lead:
 - Company: ${lead.name}
@@ -127,16 +129,15 @@ Write a cold outreach email for this lead:
 - Industry: ${lead.industry || lead.ind || 'Unknown'}
 - Budget: ${lead.budget_estimate || lead.budget || 'Unknown'}
 
-Tone: ${emailTone}
-Rules: 3-4 short paragraphs. Specific opener about THEIR business. One concrete result for similar clients. Soft CTA (15-min call). Sign off as ${name} only. Never use "I hope this email finds you well".
+Tone: ${toneMap[tone] || toneMap.professional}
+Rules: 3-4 short paragraphs. Specific opener about THEIR business. One concrete result for a similar client. Soft CTA (15-min call). Sign off as ${name} only.
 
-Respond ONLY with valid JSON (no markdown):
+Respond ONLY with valid JSON (no markdown, no backticks):
 {"subject":"...","body":"..."}`;
 }
 
 async function generateColdEmail(lead, tone = 'professional', sender = {}) {
-  const prompt = buildPrompt(lead, tone, sender);
-  const text   = await callAI(prompt);
+  const text   = await callAI(buildPrompt(lead, tone, sender));
   const parsed = parseJSON(text);
   logger.info(`Email generated for: ${lead.name}`);
   return { subject: parsed.subject, body: parsed.body, tone };
@@ -149,25 +150,15 @@ async function generateSkillAwareEmail(lead, tone = 'professional', sender = {})
 async function generateFollowUp(lead, originalBody, step = 1) {
   const guides = {
     1: 'Day 3 follow-up. 2 sentences max. Reference first email gently.',
-    2: 'Day 7 follow-up. Add value — a tip or portfolio piece for their industry.',
-    3: 'Day 14 final email. Short. Leave the door open warmly.',
+    2: 'Day 7. Add value — a tip or portfolio piece for their industry.',
+    3: 'Day 14 final. Short. Leave door open warmly.',
   };
-  const prompt = `Write a follow-up email.
-Lead: ${lead.name} — ${lead.description || lead.desc}
-Original: ${(originalBody||'').substring(0, 300)}
-Context: ${guides[step] || guides[1]}
-Respond ONLY with valid JSON: {"subject":"...","body":"..."}`;
-  const text   = await callAI(prompt);
-  const parsed = parseJSON(text);
-  return { subject: parsed.subject, body: parsed.body };
+  const text   = await callAI(`Write follow-up email.\nLead: ${lead.name}\nOriginal: ${(originalBody||'').substring(0,200)}\nContext: ${guides[step]||guides[1]}\nJSON only: {"subject":"...","body":"..."}`);
+  return parseJSON(text);
 }
 
 async function analyseLeadWithAI(lead) {
-  const prompt = `Score this freelance lead 0-100.
-Lead: ${lead.name} | ${lead.description||lead.desc} | Source: ${lead.source||lead.src} | Budget: ${lead.budget_estimate||lead.budget}
-Respond ONLY with valid JSON:
-{"score":<0-100>,"priority":"high|medium|low","reasoning":"<one sentence>","suggested_approach":"<one sentence>"}`;
-  const text   = await callAI(prompt);
+  const text = await callAI(`Score this lead 0-100 for a freelancer.\nLead: ${lead.name} | ${lead.description||lead.desc} | Source: ${lead.source||lead.src} | Budget: ${lead.budget_estimate||lead.budget}\nJSON only: {"score":<0-100>,"priority":"high|medium|low","reasoning":"<one sentence>","suggested_approach":"<one sentence>"}`);
   return parseJSON(text);
 }
 
@@ -175,9 +166,8 @@ async function testAIConnection() {
   try {
     const provider = getProvider();
     logger.info(`Testing AI: ${provider}`);
-    const text = await callAI('Reply with this exact JSON: {"status":"ok","message":"AI is working"}');
-    const ok   = text.includes('ok');
-    return { ok, provider, response: text.substring(0, 150) };
+    const text = await callAI('Reply with this exact JSON and nothing else: {"status":"ok"}');
+    return { ok: true, provider, response: text.substring(0, 100) };
   } catch (err) {
     logger.error(`AI test failed: ${err.message}`);
     return { ok: false, error: err.message };

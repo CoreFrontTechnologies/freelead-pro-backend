@@ -92,12 +92,14 @@ router.post('/scan/all', async (req, res) => {
     const { runDomainScan }       = require('../scrapers/domainTracker');
     const { runGoogleSearchScan } = require('../scrapers/googleSearch');
 
-    const [jobs, social, maps, domains, googleSearch] = await Promise.allSettled([
+    const { runExtraScan } = require('../scrapers/extraSources');
+    const [jobs, social, maps, domains, googleSearch, extra] = await Promise.allSettled([
       runJobBoardScan(),
       runSocialScan(),
       runMapsScan(),
       runDomainScan(),
       runGoogleSearchScan(),
+      runExtraScan(),
     ]);
 
     results.jobs         = jobs.value         || { error: jobs.reason?.message };
@@ -105,6 +107,7 @@ router.post('/scan/all', async (req, res) => {
     results.maps         = maps.value         || { error: maps.reason?.message };
     results.domains      = domains.value      || { error: domains.reason?.message };
     results.googleSearch = googleSearch.value || { error: googleSearch.reason?.message };
+    results.extra        = extra.value        || { error: extra.reason?.message };
 
     const totalSaved = Object.values(results).reduce((s,r) => s + (r?.saved||0), 0);
     res.json({ success: true, totalSaved, results });
@@ -141,6 +144,14 @@ router.post('/scan/domains', async (req, res) => {
   try {
     const { runDomainScan } = require('../scrapers/domainTracker');
     const result = await runDomainScan(req.body.domains);
+    res.json({ success: true, ...result });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/scan/extra', async (req, res) => {
+  try {
+    const { runExtraScan } = require('../scrapers/extraSources');
+    const result = await runExtraScan();
     res.json({ success: true, ...result });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
