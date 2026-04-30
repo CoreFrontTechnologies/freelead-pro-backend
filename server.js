@@ -1,86 +1,76 @@
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
+const app     = express();
+const PORT    = process.env.PORT || 3001;
 
-const app  = express();
-const PORT = process.env.PORT || 3001;
-
+// ── CORS ──────────────────────────────────────────────────────────
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ── Health check — must be first and always respond ───────────────
+// ── Health check — must respond immediately ───────────────────────
 app.get('/api/health', (req, res) => {
-  const memMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
   res.status(200).json({
     status    : 'ok',
-    version   : '1.0.0',
+    version   : '2.0.0',
     timestamp : new Date().toISOString(),
+    database  : process.env.DATABASE_URL ? 'postgresql' : 'sqlite',
     apis: {
-      ai         : !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY),
-      email      : !!(process.env.EMAIL_USER && process.env.EMAIL_PASS),
-      googleMaps : !!process.env.GOOGLE_MAPS_API_KEY,
-      twitter    : !!process.env.TWITTER_BEARER_TOKEN,
+      ai          : !!(process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY),
+      email       : !!(process.env.RESEND_API_KEY || (process.env.EMAIL_USER && process.env.EMAIL_PASS)),
+      googleMaps  : !!process.env.GOOGLE_MAPS_API_KEY,
+      googleSearch: !!(process.env.GOOGLE_SEARCH_API_KEY && process.env.GOOGLE_SEARCH_CX),
     }
   });
 });
 
 // ── Routes ────────────────────────────────────────────────────────
-try {
-  const leadsRouter    = require('./routes/leads');
-  const outreachRouter = require('./routes/outreach');
-  const testRouter     = require('./routes/test');
-const logsRouter     = require('./routes/logs');
-  app.use('/api/leads',    leadsRouter);
-  app.use('/api/outreach', outreachRouter);
-  app.use('/api/test',     testRouter);
-app.use('/api/logs',     logsRouter);
-} catch (err) {
-  console.error('Failed to load routes:', err.message);
-}
+app.use('/api/leads',    require('./routes/leads'));
+app.use('/api/outreach', require('./routes/outreach'));
+app.use('/api/test',     require('./routes/test'));
+app.use('/api/logs',     require('./routes/logs'));
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, _req, res, _next) => {
-  console.error('Error:', err.message);
+  console.error('Unhandled:', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── Start server FIRST, then init DB ─────────────────────────────
+// ── Start server first, then init DB in background ────────────────
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 LeadHive running on port ${PORT}`);
+  console.log(`🚀 Client Hunter API running on port ${PORT}`);
 });
 
-// Init DB in background after server is already listening
 setTimeout(async () => {
-  try {
-    const fs = require('fs');
-    if (!fs.existsSync('./logs')) fs.mkdirSync('./logs', { recursive: true });
-    if (!fs.existsSync('./db'))   fs.mkdirSync('./db',   { recursive: true });
+  const fs = require('fs');
+  if (!fs.existsSync('./logs')) fs.mkdirSync('./logs', { recursive: true });
+  if (!fs.existsSync('./db'))   fs.mkdirSync('./db',   { recursive: true });
 
+  try {
     const { initDb } = require('./db/database');
     await initDb();
-    console.log('✅ Database ready');
 
-    // Start cron jobs
+    // Start cron jobs after DB is ready
     const cron = require('node-cron');
     const { runJobBoardScan } = require('./scrapers/jobBoards');
     const { runSocialScan }   = require('./scrapers/socialMedia');
 
-    cron.schedule('0 */2 * * *', () => runJobBoardScan().catch(e => console.error('Cron jobs:', e.message)));
-    cron.schedule('0 */4 * * *', () => runSocialScan().catch(e => console.error('Cron social:', e.message)));
+    cron.schedule('0 */3 * * *', () => runJobBoardScan().catch(e => console.error('Cron jobs:', e.message)));
+    cron.schedule('0 */5 * * *', () => runSocialScan().catch(e => console.error('Cron social:', e.message)));
 
     if (process.env.GOOGLE_MAPS_API_KEY) {
       const { runMapsScan } = require('./scrapers/googleMaps');
       cron.schedule('0 8 * * *', () => runMapsScan().catch(e => console.error('Cron maps:', e.message)));
     }
-
-    if (process.env.EMAIL_USER) {
+    if (process.env.RESEND_API_KEY || process.env.EMAIL_USER) {
       const { processFollowUps } = require('./services/emailSender');
-      cron.schedule('0 10 * * *', () => processFollowUps().catch(e => console.error('Cron followup:', e.message)));
+      cron.schedule('0 10 * * *', () => processFollowUps().catch(e => console.error('Cron followups:', e.message)));
     }
 
-    console.log('✅ All systems ready');
+    console.log('✅ Database ready, cron jobs scheduled');
   } catch (err) {
-    console.error('Background init error (server still running):', err.message);
+    console.error('❌ Init error (server still running):', err.message);
   }
 }, 100);
 
